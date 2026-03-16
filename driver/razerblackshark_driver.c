@@ -93,6 +93,7 @@ static void razer_blackshark_irq_callback(struct urb *urb) {
       dev->charge_level = RAZER_BLACKSHARK_BATTERY_UNKNOWN;
       dev->charge_status = 0;
 
+			dev->last_unplug_jiffies = RAZER_BLACKSHARK_JIFFIES_INIT;
       dev_dbg(&urb->dev->dev, "razerblackshark: headset powered OFF\n");
     }
     break;
@@ -120,6 +121,7 @@ static void razer_blackshark_irq_callback(struct urb *urb) {
 
       dev_dbg(&urb->dev->dev, "razerblackshark: charging connected\n");
     }
+    break;
 
   default:
     break;
@@ -147,6 +149,7 @@ static void razer_blackshark_init(struct razer_blackshark_device *dev,
   dev->is_connected = 0;
   dev->sidetone_level = 0;
   dev->transaction_id = 0;
+	dev->last_unplug_jiffies = RAZER_BLACKSHARK_JIFFIES_INIT;
 }
 
 static int razer_blackshark_setup_irq_urb(struct razer_blackshark_device *dev,
@@ -257,7 +260,7 @@ static int razer_blackshark_probe(struct hid_device *hdev,
     goto exit_free;
   }
 
-  if (hid_hw_start(hdev, HID_CONNECT_DEFAULT)) {
+  if (hid_hw_start(hdev, HID_CONNECT_HIDRAW)) {
     hid_err(hdev, "razerblackshark: hid_hw_start failed\n");
     retval = -ENODEV;
     goto exit_free;
