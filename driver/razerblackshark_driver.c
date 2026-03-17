@@ -52,6 +52,132 @@ static ssize_t razer_attr_read_charge_status(struct device *dev,
 
 static DEVICE_ATTR(charge_status, 0440, razer_attr_read_charge_status, NULL);
 
+static int razer_blackshark_send_sidetone(struct razer_blackshark_device *dev, 
+		unsigned char level)
+{
+	unsigned char buf[RAZER_BLACKSHARK_REPORT_LEN];
+	unsigned char hw_level;
+	unsigned char crc;
+	int i, retval;
+
+	hw_level = (unsigned char)(level * 15 / 100);
+	
+// CMD-A: slot selector
+	memset(buf, 0, sizeof(buf));
+	buf[0] = 0x02;										// report ID
+	buf[1] = 0x00;										// host->device direction
+	buf[2] = dev->transaction_id++;   // sequence counter
+	buf[3] = 0x00;										// always 0x00
+	buf[6] = 0x05;										// data_size
+	buf[9] = 0x80;										// sidetone command class 
+	buf[10] = RAZER_BLACKSHARK_SUBCMD_SIDETONE_A;
+	buf[12] = 0x01;										// required
+	buf[13] = 0x01;										// slot selector
+
+
+	crc = 0;
+	for (i = 0; i < 62 ; i++) {
+		crc ^= buf[i];
+	}
+	buf[62] = crc;
+
+	retval = usb_control_msg(dev->usb_dev,
+			usb_sndctrlpipe(dev->usb_dev, 0),
+			HID_REQ_SET_REPORT,
+			USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_OUT,
+			RAZER_BLACKSHARK_REPORT_TYPE,
+			RAZER_BLACKSHARK_REPORT_INDEX,
+			buf, RAZER_BLACKSHARK_REPORT_LEN,
+			USB_CTRL_SET_TIMEOUT);
+
+	if (retval < 0 ) {
+	dev_err(&dev->usb_dev->dev,
+			"razerblackshark: sidetone CMD-A failed (%d)\n", retval);
+	return retval;
+	}
+
+	usleep_range(RAZER_BLACKSHARK_WAIT_MIN_US, RAZER_BLACKSHARK_WAIT_MAX_US);
+
+// CMD-B: level
+	memset(buf, 0, sizeof(buf));
+	
+	buf[0] = 0x02;
+	buf[1] = 0x00;
+	buf[2] = dev->transaction_id++;
+	buf[3] = 0x00;
+	buf[6] = 0x05;
+	buf[9] = 0x80;
+	buf[10] = RAZER_BLACKSHARK_SUBCMD_SIDETONE_B;
+	buf[12] = 0x01;
+	buf[13] = hw_level;
+
+	crc = 0;
+	for (i = 0; i < 62; i++) 
+		crc ^= buf[i];
+	buf[62] = crc;
+
+	retval = usb_control_msg(dev->usb_dev,
+			usb_sndctrlpipe(dev->usb_dev, 0),
+			HID_REQ_SET_REPORT,
+			USB_TYPE_CLASS | USB_RECIP_INTERFACE | USB_DIR_OUT,
+			RAZER_BLACKSHARK_REPORT_TYPE,
+			RAZER_BLACKSHARK_REPORT_INDEX,
+			buf, RAZER_BLACKSHARK_REPORT_LEN,
+			USB_CTRL_SET_TIMEOUT);
+
+	if (retval < 0) {
+	dev_err(&dev->usb_dev->dev,
+			"razerblackshark: sidetone CMD-B failed (%d)\n", retval);
+	return retval;
+	}
+
+	return 0;
+}
+
+static ssize_t razer_attr_write_sidetone(struct device *dev,
+		struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct razer_blackshark_device *blackshark = dev_get_drvdata(dev);
+	unsigned long level;
+	int retval;
+
+	if (kstrtoul(buf, 10, &level)) {
+	return -EINVAL;
+	}
+
+	if (level > 100) {
+	return -EINVAL;
+	}
+
+	mutex_lock(&blackshark->lock);
+
+	retval = razer_blackshark_send_sidetone(blackshark, (unsigned char)level);
+	if (retval == 0)
+		blackshark->sidetone_level = (unsigned char)level;
+
+	mutex_unlock(&blackshark->lock);
+
+	return retval < 0 ? retval : count;
+}
+
+static DEVICE_ATTR(sidetone, 0220, NULL, razer_attr_write_sidetone);
+
+static void razer_blackshark_sidetone_restore_work(struct work_struct *work)
+{
+	struct razer_blackshark_device *dev = 
+		container_of(work, struct razer_blackshark_device, sidetone_restore_work);
+	unsigned char level;
+
+	mutex_lock(&dev->lock);
+	level = dev->sidetone_level;
+
+	if (level > 0 )
+		razer_blackshark_send_sidetone(dev, level);
+	mutex_unlock(&dev->lock);
+
+}
+
 static void razer_blackshark_irq_callback(struct urb *urb) {
   struct razer_blackshark_device *dev = urb->context;
   unsigned char *buf = urb->transfer_buffer;
@@ -89,6 +215,8 @@ static void razer_blackshark_irq_callback(struct urb *urb) {
       dev->charge_level = RAZER_BLACKSHARK_BATTERY_UNKNOWN;
 
       dev_dbg(&urb->dev->dev, "razerblackshark: headset powered ON\n");
+
+			schedule_work(&dev->sidetone_restore_work);
     } else {
       dev->charge_level = RAZER_BLACKSHARK_BATTERY_UNKNOWN;
       dev->charge_status = 0;
@@ -150,6 +278,9 @@ static void razer_blackshark_init(struct razer_blackshark_device *dev,
   dev->sidetone_level = 0;
   dev->transaction_id = 0;
 	dev->last_unplug_jiffies = RAZER_BLACKSHARK_JIFFIES_INIT;
+
+	INIT_WORK(&dev->sidetone_restore_work,
+			razer_blackshark_sidetone_restore_work);
 }
 
 static int razer_blackshark_setup_irq_urb(struct razer_blackshark_device *dev,
@@ -250,12 +381,13 @@ static int razer_blackshark_probe(struct hid_device *hdev,
   CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_device_type);
   CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_charge_level);
   CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_charge_status);
+  CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_sidetone);
 
   hid_set_drvdata(hdev, dev);
   dev_set_drvdata(&hdev->dev, dev);
 
   if (hid_parse(hdev)) {
-    hid_err(hdev, "razerblackshark: hid_parse false\n");
+    hid_err(hdev, "razerblackshark: hid_parse failed\n");
     retval = -ENODEV;
     goto exit_free;
   }
@@ -283,6 +415,7 @@ exit_free:
   device_remove_file(&hdev->dev, &dev_attr_device_type);
   device_remove_file(&hdev->dev, &dev_attr_charge_level);
   device_remove_file(&hdev->dev, &dev_attr_charge_status);
+  device_remove_file(&hdev->dev, &dev_attr_sidetone);
   kfree(dev);
   return retval;
 }
@@ -298,6 +431,7 @@ static void razer_blackshark_disconnect(struct hid_device *hdev) {
     return;
   }
 
+	cancel_work_sync(&dev->sidetone_restore_work);
   if (dev->irq_urb) {
     usb_kill_urb(dev->irq_urb);
     usb_free_coherent(usb_dev, RAZER_BLACKSHARK_REPORT_LEN, dev->irq_buf,
@@ -305,10 +439,12 @@ static void razer_blackshark_disconnect(struct hid_device *hdev) {
     usb_free_urb(dev->irq_urb);
   }
 
+
   device_remove_file(&hdev->dev, &dev_attr_version);
   device_remove_file(&hdev->dev, &dev_attr_device_type);
   device_remove_file(&hdev->dev, &dev_attr_charge_level);
   device_remove_file(&hdev->dev, &dev_attr_charge_status);
+  device_remove_file(&hdev->dev, &dev_attr_sidetone);
 
   hid_hw_stop(hdev);
   kfree(dev);

@@ -56,6 +56,8 @@ struct razer_blackshark_device {
   unsigned short usb_pid;
 
   unsigned long last_unplug_jiffies;
+
+	struct work_struct sidetone_restore_work;
 };
 
 #define RAZER_BLACKSHARK_BATTERY_UNKNOWN 0xFF
