@@ -12,15 +12,13 @@
 
 #define RAZER_BLACKSHARK_REPORT_LEN 64
 
-#define RAZER_BLACKSHARK_HID_INTERFACE 3
-
-#define RAZER_BLACKSHARK_EP_INTERRUPT_IN 0x84
-
-#define RAZER_BLACKSHARK_REPORT_TYPE 0x0202
-#define RAZER_BLACKSHARK_REPORT_INDEX 0x0003
+#define RAZER_BLACKSHARK_HID_INTERFACE 3 
 
 #define RAZER_BLACKSHARK_PUSH_STATUS 0x0a
+#define RAZER_BLACKSHARK_PUSH_REPORT_ID 0x02
 #define RAZER_BLACKSHARK_PUSH_EVENT_ID 0x60
+
+#define RAZER_BLACKSHARK_EP_INTERRUPT_IN 0x84
 
 #define RAZER_BLACKSHARK_SUBCMD_POWER_STATE 0x20
 #define RAZER_BLACKSHARK_SUBCMD_BATTERY_LEVEL 0x21
@@ -37,27 +35,26 @@
 #define RAZER_BLACKSHARK_WAIT_MIN_US 600
 #define RAZER_BLACKSHARK_WAIT_MAX_US 1000
 
+#define RAZER_BLACKSHARK_BATTERY_UNKNOWN 0xFF
+
 struct razer_blackshark_device {
-  struct usb_device *usb_dev;
+	struct hid_device *hdev;
+	struct usb_device *usb_dev;
   struct mutex lock;
 
   unsigned char charge_level;
   unsigned char charge_status;
   unsigned char is_connected;
   unsigned char sidetone_level;
-
-  struct urb *irq_urb;
-  unsigned char *irq_buf;
-  dma_addr_t irq_buf_dma;
-
-  unsigned char transaction_id;
+	unsigned char transaction_id;
 
   unsigned short usb_vid;
   unsigned short usb_pid;
 
   unsigned long last_unplug_jiffies;
+
+	struct work_struct sidetone_restore_work;
 };
 
-#define RAZER_BLACKSHARK_BATTERY_UNKNOWN 0xFF
 
 #endif // !__HID_RAZER_BLACKSHARK_H
