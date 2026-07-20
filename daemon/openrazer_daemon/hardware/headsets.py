@@ -236,3 +236,35 @@ class RazerKrakenKittyV2(__RazerDevice):
                'set_custom_kraken']
 
     DEVICE_IMAGE = "https://medias-p1.phoenix.razer.com/sys-master-phoenix-images-container/hcc/h6b/9631977570334/kraken-kitty-v2-quartz-500x500.png"
+
+
+class RazerBlackSharkV2HS24(__RazerDevice):
+    """
+    Class for the Razer BlackShark V2 HS (2.4GHz wireless dongle)
+
+    This MediaTek-based headset has no RGB. It exposes equalizer, sidetone, mic
+    mute, DND, auto power-off, battery and status-indicator controls through the
+    razerblackshark driver.
+    """
+    EVENT_FILE_REGEX = re.compile(r'.*Razer_BlackShark_V2_HS.*-event-if03')
+
+    USB_VID = 0x1532
+    USB_PID = 0x0565
+    METHODS = ['get_device_type_headset', 'get_hardware_model',
+               'get_edition_id', 'get_hardware_id',
+               'set_equalizer_enable', 'get_equalizer_enable',
+               'set_equalizer_preset', 'get_equalizer_preset',
+               'set_equalizer', 'get_equalizer',
+               'set_sidetone', 'get_sidetone', 'get_mic_mute',
+               'set_dnd', 'get_dnd',
+               'set_status_indicator', 'get_status_indicator',
+               'get_battery', 'is_charging', 'set_idle_time', 'get_idle_time']
+
+    DEVICE_IMAGE = "https://assets2.razerzone.com/images/pnx.assets/16eac26cd230ce343f56af70ec49626a/razer-blackshark-v2-hyperspeed-black-500x500.webp"
+
+
+class RazerBlackSharkV2HSUSB(RazerBlackSharkV2HS24):
+    """
+    Class for the Razer BlackShark V2 HS (wired / charging USB mode)
+    """
+    USB_PID = 0x056e

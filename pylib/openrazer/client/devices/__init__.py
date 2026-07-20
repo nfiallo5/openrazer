@@ -75,6 +75,18 @@ class RazerDevice(object):
             'scroll_acceleration': self._has_feature('razer.device.scroll', ('getScrollAcceleration', 'setScrollAcceleration')),
             'scroll_smart_reel': self._has_feature('razer.device.scroll', ('getScrollSmartReel', 'setScrollSmartReel')),
 
+            # Headset (BlackShark V2 HS) attrs
+            'hardware_model': self._has_feature('razer.device.misc', 'getHardwareModel'),
+            'edition_id': self._has_feature('razer.device.misc', 'getEditionId'),
+            'hardware_id': self._has_feature('razer.device.misc', 'getHardwareId'),
+            'equalizer_enable': self._has_feature('razer.device.misc', ('getEqualizerEnable', 'setEqualizerEnable')),
+            'equalizer_preset': self._has_feature('razer.device.misc', ('getEqualizerPreset', 'setEqualizerPreset')),
+            'equalizer': self._has_feature('razer.device.misc', ('getEqualizer', 'setEqualizer')),
+            'sidetone': self._has_feature('razer.device.misc', ('getSidetone', 'setSidetone')),
+            'mic_mute': self._has_feature('razer.device.misc', 'getMicMute'),
+            'dnd': self._has_feature('razer.device.misc', ('getDnd', 'setDnd')),
+            'status_indicator': self._has_feature('razer.device.misc', ('getStatusIndicator', 'setStatusIndicator')),
+
             # Default device is a chroma so lighting capabilities
             'lighting': self._has_feature('razer.device.lighting.chroma'),
             'lighting_breath_single': self._has_feature('razer.device.lighting.chroma', 'setBreathSingle'),
@@ -572,6 +584,207 @@ class RazerDevice(object):
             dbuslist = self._dbus_interfaces['device'].getSupportedPollRates()
             # Repack list from dbus ints to normal ints
             return [int(d) for d in dbuslist]
+        else:
+            raise NotImplementedError()
+
+    def get_hardware_model(self) -> str:
+        """
+        Get the headset's own product id as a 4-digit hex string. Over the 2.4GHz
+        dongle this identifies the paired headset rather than the dongle.
+
+        :return: product id (e.g. "056e")
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('hardware_model'):
+            return str(self._dbus_interfaces['device'].getHardwareModel())
+        else:
+            raise NotImplementedError()
+
+    def get_edition_id(self) -> int:
+        """
+        Get the headset's edition id, identifying the product variant. Special
+        editions and colourways share a product id but differ here.
+
+        :return: edition id (0 on a standard-edition unit)
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('edition_id'):
+            return int(self._dbus_interfaces['device'].getEditionId())
+        else:
+            raise NotImplementedError()
+
+    def get_hardware_id(self) -> int:
+        """
+        Get the headset's board revision, distinct from the product id returned
+        by get_hardware_model().
+
+        :return: hardware id (0 on the initial revision)
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('hardware_id'):
+            return int(self._dbus_interfaces['device'].getHardwareId())
+        else:
+            raise NotImplementedError()
+
+    def set_equalizer_enable(self, enable: bool) -> None:
+        """
+        Enable/disable the equalizer engine (headset). The preset and custom curve
+        stay stored while it is off, but are not applied to the audio.
+
+        :param enable: True to enable
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('equalizer_enable'):
+            self._dbus_interfaces['device'].setEqualizerEnable(bool(enable))
+        else:
+            raise NotImplementedError()
+
+    def get_equalizer_enable(self) -> bool:
+        """
+        Get whether the equalizer engine is active (headset).
+
+        :return: True if enabled
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('equalizer_enable'):
+            return bool(self._dbus_interfaces['device'].getEqualizerEnable())
+        else:
+            raise NotImplementedError()
+
+    def set_equalizer_preset(self, preset: int) -> None:
+        """
+        Select a built-in equalizer preset (headset).
+
+        :param preset: preset code (0x07 game, 0x08 music, 0x09 movie, 0xff custom)
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('equalizer_preset'):
+            self._dbus_interfaces['device'].setEqualizerPreset(int(preset))
+        else:
+            raise NotImplementedError()
+
+    def get_equalizer_preset(self) -> int:
+        """
+        Get the current equalizer preset code (headset).
+
+        :return: preset code (0x07 game, 0x08 music, 0x09 movie, 0xff custom)
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('equalizer_preset'):
+            return int(self._dbus_interfaces['device'].getEqualizerPreset())
+        else:
+            raise NotImplementedError()
+
+    def set_equalizer(self, bands) -> None:
+        """
+        Set the 10-band custom equalizer curve (headset). Each band is a signed
+        gain in dB (hardware range -9..+6; values outside it saturate).
+
+        :param bands: exactly 10 signed band values
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('equalizer'):
+            bands = [int(b) for b in bands]
+            if len(bands) != 10:
+                raise ValueError("Equalizer requires exactly 10 bands")
+            self._dbus_interfaces['device'].setEqualizer(bands)
+        else:
+            raise NotImplementedError()
+
+    def get_equalizer(self) -> list:
+        """
+        Get the stored custom 10-band equalizer curve (headset) as signed dB
+        gains. Reflects the custom curve regardless of the selected preset.
+
+        :return: 10 signed band values
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('equalizer'):
+            return [int(b) for b in self._dbus_interfaces['device'].getEqualizer()]
+        else:
+            raise NotImplementedError()
+
+    def set_sidetone(self, level: int) -> None:
+        """
+        Set microphone sidetone level (headset). 0 disables, 1-15 enables.
+
+        :param level: sidetone level 0-15
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('sidetone'):
+            self._dbus_interfaces['device'].setSidetone(int(level))
+        else:
+            raise NotImplementedError()
+
+    def get_sidetone(self) -> int:
+        """
+        Get the current sidetone level (headset). 0 = off, 1-15 = active level.
+
+        :return: sidetone level
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('sidetone'):
+            return int(self._dbus_interfaces['device'].getSidetone())
+        else:
+            raise NotImplementedError()
+
+    def get_mic_mute(self) -> bool:
+        """
+        Get the microphone mute state (headset hardware mute button). Read-only.
+
+        :return: True if the mic is muted
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('mic_mute'):
+            return bool(self._dbus_interfaces['device'].getMicMute())
+        else:
+            raise NotImplementedError()
+
+    def set_dnd(self, enable: bool) -> None:
+        """
+        Enable/disable Do Not Disturb (headset).
+
+        :param enable: True to enable
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('dnd'):
+            self._dbus_interfaces['device'].setDnd(1 if enable else 0)
+        else:
+            raise NotImplementedError()
+
+    def get_dnd(self) -> bool:
+        """
+        Get the Do Not Disturb state (headset).
+
+        :return: True if enabled
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('dnd'):
+            return bool(self._dbus_interfaces['device'].getDnd())
+        else:
+            raise NotImplementedError()
+
+    def set_status_indicator(self, mode: int) -> None:
+        """
+        Set the on-headset status LED mode.
+
+        :param mode: 1 = connection, 2 = battery status, 3 = battery warning only
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('status_indicator'):
+            self._dbus_interfaces['device'].setStatusIndicator(int(mode))
+        else:
+            raise NotImplementedError()
+
+    def get_status_indicator(self) -> int:
+        """
+        Get the on-headset status LED mode.
+
+        :return: 0 = off, 1 = connection, 2 = battery status, 3 = battery warning
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('status_indicator'):
+            return int(self._dbus_interfaces['device'].getStatusIndicator())
         else:
             raise NotImplementedError()
 
