@@ -75,9 +75,12 @@
 
 /*
  * Identified but not exposed:
- *   0x20 wireless connection status (0 none, 1 2.4GHz, 2 Bluetooth to a PC,
- *   3 Bluetooth to a phone) and 0x40 basestation version, which only answers
- *   under RAZER_BS_CLASS_HEADSET.
+ *   0x20 reads 1 while the headset is on the 2.4GHz link and 0 once it leaves,
+ *   including while a Bluetooth connection is up at the same time, so it tracks
+ *   the receiver link rather than naming a transport;
+ *   0x40 basestation version, which only answers under RAZER_BS_CLASS_HEADSET.
+ * Off the 2.4GHz link the headset stops answering relayed commands entirely,
+ * so only the receiver-class registers still respond.
  * The receiver also answers a separate command channel used only for firmware
  * updates; it stays silent during normal operation and is deliberately untouched.
  */
