@@ -139,10 +139,11 @@ static int razer_bs_send_body(struct razer_blackshark_device *device,
  *
  * Unlike razer_bs_fw_query() this does not reject a non-OK status. These reads
  * address the receiver rather than the headset, and the receiver answers an
- * opcode it does not implement by staying silent (which the timeout below already
- * catches) rather than by replying RAZER_BS_STATUS_UNSUPP. Its success status has
- * not been characterised, so enforcing RAZER_BS_STATUS_OK here could reject valid
- * replies; the status is still captured for callers that want to look.
+ * opcode it does not implement by staying silent, which the timeout below already
+ * catches, rather than by replying RAZER_BS_STATUS_UNSUPP. A status check would
+ * therefore add nothing over the dongle, and the body-framed reply has not been
+ * measured on the wired unit, so enforcing one here risks rejecting valid replies
+ * for no gain. The status is still captured for callers that want to look.
  */
 static int razer_bs_query_body(struct razer_blackshark_device *device,
                                const u8 *body, u8 body_len, u8 cmd)
