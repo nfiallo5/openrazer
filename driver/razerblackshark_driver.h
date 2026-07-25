@@ -36,6 +36,20 @@
 #define RAZER_BS_PAYLOAD_INDEX  13   // payload starts here; length at byte 12
 
 /*
+ * Reply status, byte[1] of a reply report. The headset answers *every* opcode
+ * with a well-formed report: byte[10] echoes the command, byte[11] is 0x01 and
+ * byte[12..] carry a payload, whether or not the opcode exists. An unimplemented
+ * opcode is only distinguishable by this byte, where the firmware's reply builder
+ * writes 0x05 and hands back a one-byte 0x01 payload. Without checking it, an
+ * unsupported register reads back as the value 1.
+ * These are Razer's standard status codes: 00 new, 01 busy, 02 OK, 03 fail,
+ * 04 timeout, 05 not supported.
+ */
+#define RAZER_BS_STATUS_INDEX   1
+#define RAZER_BS_STATUS_OK      0x02
+#define RAZER_BS_STATUS_UNSUPP  0x05
+
+/*
  * The status-indicator LED takes a different frame from the channel above: the
  * body length at byte[6] and the body {class, opcode, 0x00, count, arg} starting
  * at byte[9], with the XOR checksum. The mode only takes effect when the set is
@@ -77,12 +91,22 @@
  * Identified but not exposed:
  *   0x20 reads 1 while the headset is on the 2.4GHz link and 0 once it leaves,
  *   including while a Bluetooth connection is up at the same time, so it tracks
- *   the receiver link rather than naming a transport;
- *   0x40 basestation version, which only answers under RAZER_BS_CLASS_HEADSET.
+ *   the receiver link rather than naming a transport.
  * Off the 2.4GHz link the headset stops answering relayed commands entirely,
  * so only the receiver-class registers still respond.
  * The receiver also answers a separate command channel used only for firmware
  * updates; it stays silent during normal operation and is deliberately untouched.
+ *
+ * Known *not* implemented by the headset, recorded so they are not re-added from
+ * a stray probe. Both were previously read as a plain 0x01 value, which is in
+ * fact the payload of an unsupported reply (see RAZER_BS_STATUS_UNSUPP):
+ *   0x40 is not a basestation version: it has no arm in the firmware's command
+ *   dispatcher and answers status 0x05 with a one-byte 0x01 payload.
+ *   0xdf (Ultra-Low-Latency, as exposed for the Kraken V3 by PR #2794) is not
+ *   implemented either; neither it nor its read form 0x5f has a dispatcher arm.
+ *   HyperSpeed latency mode is negotiated device-side over BLE CIS/CIG rather
+ *   than set by the host, so there is nothing here for a host register to do.
+ * Whether the receiver implements either in its own register space is untested.
  */
 
 #define RAZER_BS_SIDETONE_MAX   15 // sidetone level is a 4-bit field
@@ -124,6 +148,7 @@ struct razer_blackshark_device {
     struct completion fw_reply;
     bool fw_wait;                   // a read is awaiting its reply
     __u8 fw_reply_cmd;              // command byte expected echoed at reply[10]
+    __u8 fw_reply_status;           // captured reply status (reply[1])
     __u8 fw_reply_val;              // captured reply value (reply[13])
     __u8 fw_reply_len;              // captured reply payload length (reply[12])
     __u8 fw_reply_buf[16];          // captured reply payload (reply[13..])

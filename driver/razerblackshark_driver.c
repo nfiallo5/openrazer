@@ -136,6 +136,13 @@ static int razer_bs_send_body(struct razer_blackshark_device *device,
  * Send a body-framed read and wait for its reply. The reply arrives in the same
  * shape as the channel reads, so it is captured by razer_blackshark_raw_event().
  * Caller must hold device->lock.
+ *
+ * Unlike razer_bs_fw_query() this does not reject a non-OK status. These reads
+ * address the receiver rather than the headset, and the receiver answers an
+ * opcode it does not implement by staying silent (which the timeout below already
+ * catches) rather than by replying RAZER_BS_STATUS_UNSUPP. Its success status has
+ * not been characterised, so enforcing RAZER_BS_STATUS_OK here could reject valid
+ * replies; the status is still captured for callers that want to look.
  */
 static int razer_bs_query_body(struct razer_blackshark_device *device,
                                const u8 *body, u8 body_len, u8 cmd)
@@ -146,6 +153,7 @@ static int razer_bs_query_body(struct razer_blackshark_device *device,
     device->fw_reply_cmd = cmd;
     device->fw_reply_val = 0;
     device->fw_reply_len = 0;
+    device->fw_reply_status = 0;
     reinit_completion(&device->fw_reply);
     WRITE_ONCE(device->fw_wait, true);
 
@@ -186,7 +194,10 @@ static int razer_bs_send_status(struct razer_blackshark_device *device, u8 mode)
 /*
  * Send a read command and wait for its reply. The reply arrives asynchronously
  * as an input report handled by razer_blackshark_raw_event(); on success the
- * captured payload is left in device->fw_reply_*. Returns 0 or a negative errno.
+ * captured payload is left in device->fw_reply_*. Returns 0 or a negative errno,
+ * including -EOPNOTSUPP when the device answered but reported a status other than
+ * RAZER_BS_STATUS_OK -- most often RAZER_BS_STATUS_UNSUPP, whose 0x01 payload is
+ * otherwise indistinguishable from a register that genuinely reads 1.
  * Caller must hold device->lock (only one read in flight at a time).
  */
 static int razer_bs_fw_query(struct razer_blackshark_device *device, u8 cmd)
@@ -210,6 +221,7 @@ static int razer_bs_fw_query(struct razer_blackshark_device *device, u8 cmd)
     device->fw_reply_cmd = cmd;
     device->fw_reply_val = 0;
     device->fw_reply_len = 0;
+    device->fw_reply_status = 0;
     reinit_completion(&device->fw_reply);
     WRITE_ONCE(device->fw_wait, true);
 
@@ -232,6 +244,12 @@ static int razer_bs_fw_query(struct razer_blackshark_device *device, u8 cmd)
         /* Expected when a dongle has no headset linked; keep it out of the log. */
         hid_dbg(device->hdev, "razerblackshark: read 0x%02x timed out\n", cmd);
         return -ETIMEDOUT;
+    }
+
+    if (device->fw_reply_status != RAZER_BS_STATUS_OK) {
+        hid_dbg(device->hdev, "razerblackshark: read 0x%02x returned status 0x%02x\n",
+                cmd, device->fw_reply_status);
+        return -EOPNOTSUPP;
     }
     return 0;
 }
@@ -264,6 +282,11 @@ static int razer_bs_fw_get_buf(struct razer_blackshark_device *device, u8 cmd,
  * whose byte[10] echoes the command, byte[12] holds the payload length and
  * byte[13..] the value bytes. This only looks while a read is pending; returning
  * 0 leaves the report for hidraw and other users.
+ *
+ * The status at byte[1] is captured but not matched on: an unsupported opcode is
+ * answered by a report that is well-formed in every other respect, so refusing to
+ * complete on it would only turn the read into a RAZER_BS_REPLY_TIMEOUT_MS stall.
+ * The waiter inspects the status instead.
  */
 static int razer_blackshark_raw_event(struct hid_device *hdev, struct hid_report *report,
                                       u8 *data, int size)
@@ -286,6 +309,7 @@ static int razer_blackshark_raw_event(struct hid_device *hdev, struct hid_report
         device->fw_reply_len = plen;
         memcpy(device->fw_reply_buf, &data[RAZER_BS_PAYLOAD_INDEX], plen);
         device->fw_reply_val = data[RAZER_BS_PAYLOAD_INDEX];
+        device->fw_reply_status = data[RAZER_BS_STATUS_INDEX];
         complete(&device->fw_reply);
     }
     return 0;
