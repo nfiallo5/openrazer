@@ -97,24 +97,26 @@
  * The receiver also answers a separate command channel used only for firmware
  * updates; it stays silent during normal operation and is deliberately untouched.
  *
- * The receiver's own register space is much smaller than the headset's. Swept
- * over the 2.4GHz dongle with a headset linked, RAZER_BS_CLASS_RECEIVER answers
- * only 0x00..0x04, 0x20 and 0x66, and stays silent for every other read rather
- * than replying RAZER_BS_STATUS_UNSUPP the way the headset does. Note 0x03 is
- * per-class: the receiver reports its own product id, the headset the paired
- * headset's.
+ * The receiver's own register space is far smaller than the headset's, and it is
+ * complete: RAZER_BS_CLASS_RECEIVER implements exactly 0x00..0x04, 0x20, 0x66 and
+ * 0x66's write form 0xe6, and answers anything else by staying silent rather than
+ * by replying RAZER_BS_STATUS_UNSUPP the way the headset does. 0xe6 is the only
+ * receiver write there is, so this driver already covers the whole receiver
+ * space. Note 0x03 is per-class: the receiver reports its own product id, the
+ * headset the paired headset's.
  *
  * Known *not* implemented, by the headset or the receiver, recorded so they are
  * not re-added from a stray probe. Both were previously read as a plain 0x01
  * value, which is in fact the payload of an unsupported reply:
- *   0x40 is not a basestation version: it has no arm in the headset's command
- *   dispatcher and answers RAZER_BS_STATUS_UNSUPP with a one-byte 0x01 payload,
- *   while the receiver does not answer it at all.
+ *   0x40 is not a basestation version. It has no arm in either dispatcher: the
+ *   headset answers RAZER_BS_STATUS_UNSUPP with a one-byte 0x01 payload, and the
+ *   receiver does not answer it at all.
  *   0xdf (Ultra-Low-Latency, as exposed for the Kraken V3 by PR #2794) is not
- *   implemented either; neither it nor its read form 0x5f has a dispatcher arm,
- *   and 0x5f behaves exactly like 0x40 under both classes. HyperSpeed latency
- *   mode is negotiated device-side over BLE CIS/CIG rather than set by the host,
- *   so there is nothing here for a host register to do.
+ *   implemented either, and neither is its read form 0x5f. Both are absent from
+ *   both dispatchers, so this is not a case of a write with no readable
+ *   counterpart. HyperSpeed latency mode is negotiated device-side over BLE
+ *   CIS/CIG rather than set by the host, so there is nothing for a host register
+ *   to do; writing 0xdf would be answered "unsupported" and change nothing.
  */
 
 #define RAZER_BS_SIDETONE_MAX   15 // sidetone level is a 4-bit field
