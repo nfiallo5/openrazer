@@ -605,11 +605,20 @@ class RazerDaemon(DBusService):
 
     def _collecting_udev_method(self, device):
         time.sleep(2)  # delay to let udev add all devices that we want
-        # Sort the devices
-        self._collecting_udev_devices.sort(key=lambda x: x.sys_path, reverse=True)
-        for d in self._collecting_udev_devices:
-            self._add_device(d)
-        self._collecting_udev = False
+        try:
+            # Sort the devices
+            self._collecting_udev_devices.sort(key=lambda x: x.sys_path, reverse=True)
+            for d in self._collecting_udev_devices:
+                try:
+                    self._add_device(d)
+                except (FileNotFoundError, OSError) as e:
+                    # Device node can vanish between the udev event and the sysfs
+                    # read (e.g. a 2.4GHz dongle re-enumerating). Skip it instead
+                    # of killing this thread, which would leave _collecting_udev
+                    # stuck True and make the daemon deaf to all future events.
+                    self.logger.warning("Skipping transient udev device %s: %s", d.sys_name, e)
+        finally:
+            self._collecting_udev = False
 
     def run(self):
         """
