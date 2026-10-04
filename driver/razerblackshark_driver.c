@@ -17,7 +17,8 @@
 #include <linux/hid.h>
 #include <linux/mutex.h>
 #include <linux/completion.h>
-#include <linux/random.h>
+#include <linux/workqueue.h>
+#include <linux/string.h>
 
 #include "razerblackshark_driver.h"
 #include "razercommon.h"
@@ -318,7 +319,7 @@ static int razer_blackshark_raw_event(struct hid_device *hdev, struct hid_report
 
 /* ---------------------------------------------------------------- read attrs */
 
-static void razer_blackshark_read_ids(struct razer_blackshark_device *device);
+static void razer_blackshark_ids_work(struct work_struct *work);
 
 static ssize_t razer_attr_read_version(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -348,23 +349,31 @@ static ssize_t razer_attr_read_device_type(struct device *dev, struct device_att
 }
 
 /*
- * These headsets reject the classic get_serial / get_firmware commands, so we
- * provide stable fallbacks (matching how razerkraken behaves on read failure).
+ * Serial and firmware version are fetched in the background by
+ * razer_blackshark_ids_work(); these handlers never touch the device, they only
+ * emit what is currently stored (the fallback until a fetch succeeds), under
+ * @lock so they cannot race the work updating the buffers.
  */
 static ssize_t razer_attr_read_device_serial(struct device *dev, struct device_attribute *attr, char *buf)
 {
     struct razer_blackshark_device *device = dev_get_drvdata(dev);
+    ssize_t ret;
 
-    razer_blackshark_read_ids(device);      // fetch the real serial if not yet done
-    return sysfs_emit(buf, "%s\n", device->serial);
+    mutex_lock(&device->lock);
+    ret = sysfs_emit(buf, "%s\n", device->serial);
+    mutex_unlock(&device->lock);
+    return ret;
 }
 
 static ssize_t razer_attr_read_firmware_version(struct device *dev, struct device_attribute *attr, char *buf)
 {
     struct razer_blackshark_device *device = dev_get_drvdata(dev);
+    ssize_t ret;
 
-    razer_blackshark_read_ids(device);      // fetch the real firmware if not yet done
-    return sysfs_emit(buf, "v%u.%u\n", device->firmware_version[1], device->firmware_version[2]);
+    mutex_lock(&device->lock);
+    ret = sysfs_emit(buf, "v%u.%u\n", device->firmware_version[1], device->firmware_version[2]);
+    mutex_unlock(&device->lock);
+    return ret;
 }
 
 /*
@@ -462,10 +471,27 @@ static ssize_t razer_attr_read_charge_level(struct device *dev, struct device_at
     percent = razer_bs_fw_get(device, RAZER_BS_FW_BATTERY);
     mutex_unlock(&device->lock);
 
+    /*
+     * Headset asleep or out of range while the dongle stays connected: the
+     * relayed read just times out. Every OpenRazer battery consumer expects
+     * this file to always parse as a number, with -1 meaning "unknown" (the
+     * daemon's get_battery does `if battery_255 < 0: return -1.0`). Returning
+     * the raw errno instead makes the read() syscall fail and the caller
+     * throw, so emit the sentinel.
+     */
     if (percent < 0)
-        return percent;
+        return sysfs_emit(buf, "-1\n");
     if (percent > 100)
         percent = 100;
+
+    /*
+     * The headset answered, so it is awake and reachable: a good moment to
+     * pick up the real serial / firmware if the probe-time attempts missed
+     * them (headset powered on well after boot).
+     */
+    if (!READ_ONCE(device->ids_stop) &&
+        !(READ_ONCE(device->serial_read) && READ_ONCE(device->fw_read)))
+        schedule_delayed_work(&device->ids_work, 0);
 
     return sysfs_emit(buf, "%d\n", DIV_ROUND_CLOSEST(percent * 255, 100));
 }
@@ -484,8 +510,10 @@ static ssize_t razer_attr_read_charge_status(struct device *dev, struct device_a
     charging = razer_bs_fw_get(device, RAZER_BS_FW_CHARGING);
     mutex_unlock(&device->lock);
 
+    /* See razer_attr_read_charge_level: emit a parseable sentinel, not an
+     * errno, when the headset is unreachable. */
     if (charging < 0)
-        return charging;
+        return sysfs_emit(buf, "0\n");
 
     return sysfs_emit(buf, "%d\n", charging ? 1 : 0);
 }
@@ -811,8 +839,10 @@ static ssize_t razer_attr_read_device_idle_time(struct device *dev, struct devic
     minutes = razer_bs_fw_get(device, RAZER_BS_FW_AUTO_OFF_R);
     mutex_unlock(&device->lock);
 
+    /* Unreachable headset: emit a parseable sentinel rather than an errno so a
+     * plain `cat` and script read still work (see charge_level). */
     if (minutes < 0)
-        return minutes;
+        return sysfs_emit(buf, "-1\n");
 
     return sysfs_emit(buf, "%d\n", minutes * 60);
 }
@@ -884,69 +914,112 @@ static DEVICE_ATTR(status_indicator,  0660, razer_attr_read_status_indicator, ra
 
 /* --------------------------------------------------------------- probe/remove */
 
+/*
+ * A serial we can key persistence off: at least RAZER_BS_SERIAL_MIN printable
+ * characters and not all identical. Rejects this dongle's placeholder USB
+ * iSerial ("0000000000000000") and an all-zero reply from a flaky link.
+ */
+static bool bs_serial_usable(const char *s)
+{
+    size_t i, len = strnlen(s, RAZER_BS_SERIAL_LEN);
+
+    if (len < RAZER_BS_SERIAL_MIN)
+        return false;
+    for (i = 0; i < len; i++) {
+        if (s[i] < 0x20 || s[i] > 0x7e)
+            return false;               // not printable ASCII
+        if (s[i] != s[0])
+            break;                      // has variation, not a degenerate string
+    }
+    return i != len;                    // i == len => every character identical
+}
+
 static void razer_blackshark_init(struct razer_blackshark_device *dev, struct usb_interface *intf, struct hid_device *hdev)
 {
     struct usb_device *usb_dev = interface_to_usbdev(intf);
-    unsigned int rand_serial = 0;
 
     mutex_init(&dev->lock);
     init_completion(&dev->fw_reply);
+    INIT_DELAYED_WORK(&dev->ids_work, razer_blackshark_ids_work);
     dev->hdev = hdev;
     dev->usb_dev = usb_dev;
     dev->usb_pid = le16_to_cpu(usb_dev->descriptor.idProduct);
 
     /*
-     * Stable fallbacks, overwritten with the real values by
-     * razer_blackshark_read_ids() once the HID transport is up.
+     * Stable fallbacks until razer_blackshark_ids_work() reads the real values
+     * off the device. The dongle's USB iSerial is a placeholder, so fall back
+     * to a constant derived from the product id: identical across reboots,
+     * which keeps the daemon's persistence key (and D-Bus path) stable even
+     * when the headset is never powered on.
      */
-    get_random_bytes(&rand_serial, sizeof(unsigned int));
-    scnprintf(dev->serial, sizeof(dev->serial), "BS%013u", rand_serial);
+    if (usb_dev->serial && bs_serial_usable(usb_dev->serial))
+        scnprintf(dev->serial, sizeof(dev->serial), "%s", usb_dev->serial);
+    else
+        scnprintf(dev->serial, sizeof(dev->serial), "BS-%04x", dev->usb_pid);
     dev->firmware_version[0] = 1;
     dev->firmware_version[1] = 1;
     dev->firmware_version[2] = 0;
 }
 
 /*
- * Read the real serial number and firmware version from the device, replacing
- * the fallbacks. Best-effort and idempotent: a 2.4GHz dongle needs a moment
- * after enumeration before it will relay headset reads, so the probe-time
- * attempt can time out; the serial and firmware read handlers call this again
- * until it succeeds once, after which @ids_read latches and further calls return
- * immediately.
+ * Fetch the real serial number and firmware version in the background.
+ *
+ * Run off a delayed_work rather than from probe or the sysfs read path: a
+ * 2.4GHz dongle needs a moment after enumeration before it relays headset
+ * reads, and the headset may be powered off entirely. Each run attempts only
+ * the ids not yet obtained, holds @lock only for the ~500ms of an actual query
+ * (never across the inter-attempt delay), and reschedules itself with a fixed
+ * backoff up to RAZER_BS_IDS_MAX_ATTEMPTS. A successful charge_level /
+ * charge_status read also kicks it, so a headset powered on long after boot is
+ * still picked up. @ids_attempts is only ever touched here, and the work is
+ * never concurrent with itself, so it needs no locking.
  */
-static void razer_blackshark_read_ids(struct razer_blackshark_device *device)
+static void razer_blackshark_ids_work(struct work_struct *work)
 {
-    u8 tmp[16];
+    struct razer_blackshark_device *device =
+        container_of(to_delayed_work(work), struct razer_blackshark_device, ids_work);
     int n;
-    bool got_serial = false, got_fw = false;
 
-    mutex_lock(&device->lock);
-    if (device->ids_read) {
-        mutex_unlock(&device->lock);
+    if (READ_ONCE(device->ids_stop))
         return;
+
+    if (!device->serial_read) {
+        char tmp[RAZER_BS_SERIAL_LEN];
+
+        mutex_lock(&device->lock);
+        n = razer_bs_fw_get_buf(device, RAZER_BS_FW_SERIAL, (u8 *)tmp, sizeof(tmp) - 1);
+        if (n > 0) {
+            tmp[n] = '\0';
+            if (bs_serial_usable(tmp)) {
+                scnprintf(device->serial, sizeof(device->serial), "%s", tmp);
+                device->serial_read = true;
+            }
+            /* not usable: leave the fallback in place and retry */
+        }
+        mutex_unlock(&device->lock);
     }
 
-    n = razer_bs_fw_get_buf(device, RAZER_BS_FW_SERIAL, tmp, sizeof(tmp));
-    if (n > 0) {
-        if (n > sizeof(device->serial) - 1)
-            n = sizeof(device->serial) - 1;
-        memcpy(device->serial, tmp, n);
-        device->serial[n] = '\0';
-        got_serial = true;
+    if (!device->fw_read) {
+        u8 tmp[16];
+
+        mutex_lock(&device->lock);
+        n = razer_bs_fw_get_buf(device, RAZER_BS_FW_VERSION, tmp, sizeof(tmp));
+        if (n >= 2) {
+            device->firmware_version[0] = 1;
+            device->firmware_version[1] = tmp[0];   // major
+            device->firmware_version[2] = tmp[1];   // minor
+            device->fw_read = true;
+        }
+        mutex_unlock(&device->lock);
     }
 
-    n = razer_bs_fw_get_buf(device, RAZER_BS_FW_VERSION, tmp, sizeof(tmp));
-    if (n >= 2) {
-        device->firmware_version[0] = 1;
-        device->firmware_version[1] = tmp[0];   // major
-        device->firmware_version[2] = tmp[1];   // minor
-        got_fw = true;
-    }
-
-    if (got_serial && got_fw)
-        device->ids_read = true;
-
-    mutex_unlock(&device->lock);
+    if (device->serial_read && device->fw_read)
+        return;
+    if (READ_ONCE(device->ids_stop))
+        return;
+    if (++device->ids_attempts < RAZER_BS_IDS_MAX_ATTEMPTS)
+        schedule_delayed_work(&device->ids_work,
+                              msecs_to_jiffies(RAZER_BS_IDS_RETRY_MS));
 }
 
 static void razer_blackshark_remove_files(struct hid_device *hdev)
@@ -1036,10 +1109,14 @@ static int razer_blackshark_probe(struct hid_device *hdev, const struct hid_devi
         goto exit_stop;
     }
 
-    // Replace the serial/firmware fallbacks with the real values (best-effort).
-    razer_blackshark_read_ids(dev);
-
     usb_disable_autosuspend(usb_dev);
+
+    /*
+     * Kick off the background serial / firmware fetch. Scheduled last: the
+     * error paths below never reach here, so they need no cancel.
+     */
+    schedule_delayed_work(&dev->ids_work,
+                          msecs_to_jiffies(RAZER_BS_IDS_FIRST_DELAY_MS));
     return 0;
 
 exit_stop:
@@ -1054,7 +1131,16 @@ static void razer_blackshark_disconnect(struct hid_device *hdev)
 {
     struct razer_blackshark_device *dev = hid_get_drvdata(hdev);
 
+    /*
+     * Order matters. Drop the sysfs files first so no read handler can kick
+     * ids_work again. Then stop and flush ids_work (ids_stop makes an in-flight
+     * run not reschedule; cancel_delayed_work_sync waits it out -- up to one
+     * reply timeout) while the HID transport it uses is still up. Only then
+     * tear down HID and free dev.
+     */
     razer_blackshark_remove_files(hdev);
+    WRITE_ONCE(dev->ids_stop, true);
+    cancel_delayed_work_sync(&dev->ids_work);
 
     hid_hw_close(hdev);
     hid_hw_stop(hdev);

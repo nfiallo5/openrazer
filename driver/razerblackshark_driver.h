@@ -142,12 +142,19 @@
 #define RAZER_BS_WAIT_US          3000 // fsleep after each control message
 #define RAZER_BS_REPLY_TIMEOUT_MS 500  // how long to wait for a read reply report
 
+/* Background serial / firmware fetch (see razer_blackshark_ids_work). */
+#define RAZER_BS_SERIAL_LEN         23   // serial buffer size, including the NUL
+#define RAZER_BS_SERIAL_MIN         8    // shortest string accepted as a serial
+#define RAZER_BS_IDS_FIRST_DELAY_MS 1500 // delay before the first fetch attempt
+#define RAZER_BS_IDS_RETRY_MS       4000 // gap between fetch retries
+#define RAZER_BS_IDS_MAX_ATTEMPTS   6    // stop retrying after this many
+
 struct razer_blackshark_device {
     struct usb_device *usb_dev;
     struct hid_device *hdev;
     struct mutex lock;
     unsigned int usb_pid;
-    char serial[23];
+    char serial[RAZER_BS_SERIAL_LEN];
     unsigned char firmware_version[3];
 
     /*
@@ -162,7 +169,20 @@ struct razer_blackshark_device {
     __u8 fw_reply_val;              // captured reply value (reply[13])
     __u8 fw_reply_len;              // captured reply payload length (reply[12])
     __u8 fw_reply_buf[16];          // captured reply payload (reply[13..])
-    bool ids_read;                  // real serial + firmware fetched
+
+    /*
+     * @serial and @firmware_version are filled in by @ids_work, scheduled from
+     * probe, not read synchronously: the dongle needs a moment after
+     * enumeration to relay headset reads and the headset may be off entirely.
+     * Until a fetch succeeds they hold the fallbacks set in
+     * razer_blackshark_init(); the sysfs read handlers only ever emit what is
+     * stored, under @lock.
+     */
+    struct delayed_work ids_work;
+    unsigned int ids_attempts;      // fetch retries so far (touched only by ids_work)
+    bool serial_read;               // a usable serial has been stored
+    bool fw_read;                   // a firmware version has been stored
+    bool ids_stop;                  // disconnect in progress: ids_work must not rearm
 };
 
 #endif /* DRIVER_RAZERBLACKSHARK_H_ */
