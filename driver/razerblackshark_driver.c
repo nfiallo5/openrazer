@@ -289,14 +289,38 @@ static int razer_bs_fw_get_buf(struct razer_blackshark_device *device, u8 cmd,
  * answered by a report that is well-formed in every other respect, so refusing to
  * complete on it would only turn the read into a RAZER_BS_REPLY_TIMEOUT_MS stall.
  * The waiter inspects the status instead.
+ *
+ * Unsolicited link pushes (receiver register 0x20) are picked up first, whether
+ * or not a read is pending. This runs in interrupt context, so it only records
+ * the new state; @link_work does the reporting.
  */
 static int razer_blackshark_raw_event(struct hid_device *hdev, struct hid_report *report,
                                       u8 *data, int size)
 {
     struct razer_blackshark_device *device = hid_get_drvdata(hdev);
     u8 plen;
+    int link;
 
-    if (!device || !READ_ONCE(device->fw_wait))
+    if (!device)
+        return 0;
+
+    if (device->usb_pid == USB_DEVICE_ID_RAZER_BLACKSHARK_V2_HS_24 &&
+        size > RAZER_BS_PAYLOAD_INDEX &&
+        data[0] == RAZER_BS_REPORT_ID &&
+        data[RAZER_BS_STATUS_INDEX] == RAZER_BS_PUSH_STATUS &&
+        data[10] == RAZER_BS_RX_LINK &&
+        data[11] == RAZER_BS_PUSH_FLAG &&
+        data[12] >= 1) {
+        link = data[RAZER_BS_PAYLOAD_INDEX] ? 1 : 0;
+        if (READ_ONCE(device->link_state) != link) {
+            WRITE_ONCE(device->link_state, link);
+            if (!READ_ONCE(device->ids_stop))
+                mod_delayed_work(system_wq, &device->link_work, 0);
+        }
+        return 0;
+    }
+
+    if (!READ_ONCE(device->fw_wait))
         return 0;
 
     if (size > RAZER_BS_PAYLOAD_INDEX &&
@@ -320,6 +344,7 @@ static int razer_blackshark_raw_event(struct hid_device *hdev, struct hid_report
 /* ---------------------------------------------------------------- read attrs */
 
 static void razer_blackshark_ids_work(struct work_struct *work);
+static void razer_blackshark_link_work(struct work_struct *work);
 
 static ssize_t razer_attr_read_version(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -516,6 +541,22 @@ static ssize_t razer_attr_read_charge_status(struct device *dev, struct device_a
         return sysfs_emit(buf, "0\n");
 
     return sysfs_emit(buf, "%d\n", charging ? 1 : 0);
+}
+
+/*
+ * Read device file "headset_connected" (dongle only)
+ *
+ * 1 while the headset is on the 2.4GHz link, 0 while it is off or out of range,
+ * -1 until the state is first known. Never touches the device: it emits the state
+ * kept current by the receiver's pushes, so it is cheap to read. Each change is
+ * signalled with sysfs_notify() on this file and a KOBJ_CHANGE uevent carrying
+ * HEADSET_CONNECTED=0|1, so user space can wait for it instead of polling.
+ */
+static ssize_t razer_attr_read_headset_connected(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct razer_blackshark_device *device = dev_get_drvdata(dev);
+
+    return sysfs_emit(buf, "%d\n", READ_ONCE(device->link_state));
 }
 
 /* --------------------------------------------------------------- write attrs */
@@ -903,6 +944,7 @@ static DEVICE_ATTR(edition_id,        0440, razer_attr_read_edition_id,       NU
 static DEVICE_ATTR(hardware_id,       0440, razer_attr_read_hardware_id,      NULL);
 static DEVICE_ATTR(charge_level,      0440, razer_attr_read_charge_level,     NULL);
 static DEVICE_ATTR(charge_status,     0440, razer_attr_read_charge_status,    NULL);
+static DEVICE_ATTR(headset_connected, 0440, razer_attr_read_headset_connected, NULL);
 static DEVICE_ATTR(equalizer_enable,  0660, razer_attr_read_equalizer_enable, razer_attr_write_equalizer_enable);
 static DEVICE_ATTR(equalizer_preset,  0660, razer_attr_read_equalizer_preset, razer_attr_write_equalizer_preset);
 static DEVICE_ATTR(equalizer,         0660, razer_attr_read_equalizer,        razer_attr_write_equalizer);
@@ -941,6 +983,9 @@ static void razer_blackshark_init(struct razer_blackshark_device *dev, struct us
     mutex_init(&dev->lock);
     init_completion(&dev->fw_reply);
     INIT_DELAYED_WORK(&dev->ids_work, razer_blackshark_ids_work);
+    INIT_DELAYED_WORK(&dev->link_work, razer_blackshark_link_work);
+    dev->link_state = RAZER_BS_LINK_UNKNOWN;
+    dev->link_reported = RAZER_BS_LINK_UNKNOWN;
     dev->hdev = hdev;
     dev->usb_dev = usb_dev;
     dev->usb_pid = le16_to_cpu(usb_dev->descriptor.idProduct);
@@ -1022,6 +1067,66 @@ static void razer_blackshark_ids_work(struct work_struct *work)
                               msecs_to_jiffies(RAZER_BS_IDS_RETRY_MS));
 }
 
+/*
+ * Track the headset's 2.4GHz link and report each change to user space.
+ *
+ * Kicked by .raw_event on every 0x20 push, and scheduled once from probe. While
+ * the state is still unknown it reads receiver register 0x20 to seed it,
+ * retrying up to RAZER_BS_LINK_MAX_ATTEMPTS. The read result is only stored if
+ * no push landed meanwhile, as a push is always the newer state. Reporting is
+ * done here rather than in .raw_event because kobject_uevent_env() can sleep.
+ *
+ * A headset that has just joined is also the moment to fetch a serial / firmware
+ * the probe-time attempts missed, so ids_work is kicked on every 0 -> 1 change.
+ */
+static void razer_blackshark_link_work(struct work_struct *work)
+{
+    struct razer_blackshark_device *device =
+        container_of(to_delayed_work(work), struct razer_blackshark_device, link_work);
+    u8 body[] = { RAZER_BS_CLASS_RECEIVER, RAZER_BS_RX_LINK, 0x00, 0x00 };
+    char env[] = "HEADSET_CONNECTED=0";
+    char *envp[] = { env, NULL };
+    int ret, val = 0, state;
+
+    if (READ_ONCE(device->ids_stop))
+        return;
+
+    if (READ_ONCE(device->link_state) == RAZER_BS_LINK_UNKNOWN) {
+        mutex_lock(&device->lock);
+        ret = razer_bs_query_body(device, body, sizeof(body), RAZER_BS_RX_LINK);
+        if (!ret)
+            val = device->fw_reply_val ? 1 : 0;
+        mutex_unlock(&device->lock);
+
+        if (!ret)
+            cmpxchg(&device->link_state, RAZER_BS_LINK_UNKNOWN, val);
+    }
+
+    state = READ_ONCE(device->link_state);
+    if (state == RAZER_BS_LINK_UNKNOWN) {
+        if (++device->link_attempts < RAZER_BS_LINK_MAX_ATTEMPTS &&
+            !READ_ONCE(device->ids_stop))
+            schedule_delayed_work(&device->link_work,
+                                  msecs_to_jiffies(RAZER_BS_LINK_RETRY_MS));
+        return;
+    }
+
+    if (state == device->link_reported)
+        return;
+    device->link_reported = state;
+
+    hid_dbg(device->hdev, "razerblackshark: headset %s\n",
+            state ? "connected" : "disconnected");
+    sysfs_notify(&device->hdev->dev.kobj, NULL, "headset_connected");
+    env[sizeof(env) - 2] = state ? '1' : '0';
+    kobject_uevent_env(&device->hdev->dev.kobj, KOBJ_CHANGE, envp);
+
+    if (state && !READ_ONCE(device->ids_stop) &&
+        !(READ_ONCE(device->serial_read) && READ_ONCE(device->fw_read)))
+        schedule_delayed_work(&device->ids_work,
+                              msecs_to_jiffies(RAZER_BS_IDS_FIRST_DELAY_MS));
+}
+
 static void razer_blackshark_remove_files(struct hid_device *hdev)
 {
     device_remove_file(&hdev->dev, &dev_attr_version);
@@ -1035,6 +1140,7 @@ static void razer_blackshark_remove_files(struct hid_device *hdev)
     device_remove_file(&hdev->dev, &dev_attr_hardware_id);
     device_remove_file(&hdev->dev, &dev_attr_charge_level);
     device_remove_file(&hdev->dev, &dev_attr_charge_status);
+    device_remove_file(&hdev->dev, &dev_attr_headset_connected);
     device_remove_file(&hdev->dev, &dev_attr_equalizer_enable);
     device_remove_file(&hdev->dev, &dev_attr_equalizer_preset);
     device_remove_file(&hdev->dev, &dev_attr_equalizer);
@@ -1087,6 +1193,10 @@ static int razer_blackshark_probe(struct hid_device *hdev, const struct hid_devi
         break;
     }
 
+    /* Only the dongle has a link to track: the wired unit is the headset. */
+    if (dev->usb_pid == USB_DEVICE_ID_RAZER_BLACKSHARK_V2_HS_24)
+        CREATE_DEVICE_FILE(&hdev->dev, &dev_attr_headset_connected);
+
     retval = hid_parse(hdev);
     if (retval) {
         hid_err(hdev, "parse failed\n");
@@ -1117,10 +1227,15 @@ static int razer_blackshark_probe(struct hid_device *hdev, const struct hid_devi
      */
     schedule_delayed_work(&dev->ids_work,
                           msecs_to_jiffies(RAZER_BS_IDS_FIRST_DELAY_MS));
+    if (dev->usb_pid == USB_DEVICE_ID_RAZER_BLACKSHARK_V2_HS_24)
+        schedule_delayed_work(&dev->link_work, 0);
     return 0;
 
 exit_stop:
+    /* A push seen through hidraw may already have queued link_work. */
+    WRITE_ONCE(dev->ids_stop, true);
     hid_hw_stop(hdev);
+    cancel_delayed_work_sync(&dev->link_work);
 exit_free:
     razer_blackshark_remove_files(hdev);
     kfree(dev);
@@ -1133,17 +1248,21 @@ static void razer_blackshark_disconnect(struct hid_device *hdev)
 
     /*
      * Order matters. Drop the sysfs files first so no read handler can kick
-     * ids_work again. Then stop and flush ids_work (ids_stop makes an in-flight
-     * run not reschedule; cancel_delayed_work_sync waits it out -- up to one
-     * reply timeout) while the HID transport it uses is still up. Only then
-     * tear down HID and free dev.
+     * ids_work again. Then stop and flush both works (ids_stop makes an
+     * in-flight run not reschedule and .raw_event not queue link_work;
+     * cancel_delayed_work_sync waits a run out -- up to one reply timeout)
+     * while the HID transport they use is still up. Once HID is stopped no
+     * report can arrive, so a final cancel catches a link_work queued by a push
+     * that raced the ids_stop store. Only then free dev.
      */
     razer_blackshark_remove_files(hdev);
     WRITE_ONCE(dev->ids_stop, true);
     cancel_delayed_work_sync(&dev->ids_work);
+    cancel_delayed_work_sync(&dev->link_work);
 
     hid_hw_close(hdev);
     hid_hw_stop(hdev);
+    cancel_delayed_work_sync(&dev->link_work);
     kfree(dev);
     hid_info(hdev, "Razer BlackShark disconnected\n");
 }

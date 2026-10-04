@@ -86,14 +86,30 @@
 #define RAZER_BS_FW_DND           0xa7 // write do-not-disturb (payload 0/1)
 #define RAZER_BS_FW_AUTO_OFF      0xac // write auto-power-off timer (minutes)
 #define RAZER_BS_FW_STATUS        0xe6 // write status-indicator LED mode
+#define RAZER_BS_RX_LINK          0x20 // receiver: headset on the 2.4GHz link (1 = yes)
+
+#define RAZER_BS_PUSH_STATUS      0x0a // byte[1] of an unsolicited report
+#define RAZER_BS_PUSH_FLAG        0x02 // byte[11] of an unsolicited report
 
 /*
- * Identified but not exposed:
- *   0x20 reads 1 while the headset is on the 2.4GHz link and 0 once it leaves,
- *   including while a Bluetooth connection is up at the same time, so it tracks
- *   the receiver link rather than naming a transport.
+ * Receiver register 0x20 reads 1 while the headset is on the 2.4GHz link and 0
+ * once it leaves, including while a Bluetooth connection is up at the same time,
+ * so it tracks the receiver link rather than naming a transport. It is exposed
+ * as "headset_connected".
  * Off the 2.4GHz link the headset stops answering relayed commands entirely,
  * so only the receiver-class registers still respond.
+ *
+ * The receiver also pushes unsolicited reports, unprompted by any read. They use
+ * the reply layout but carry RAZER_BS_PUSH_STATUS at byte[1] and
+ * RAZER_BS_PUSH_FLAG at byte[11] (a reply carries 0x01 there), with the register
+ * at byte[10] and its new value at byte[13]. Measured on the dongle:
+ *   0x20 is pushed on every link change: 0 as the headset powers off (the only
+ *   report it sends on the way down) and 1 as it comes back.
+ *   0x27, 0x21 and 0x55 follow the 0x20 = 1 push on power-on, in that order,
+ *   and are never pushed on power-off.
+ *   0x21 and 0x2a are also pushed when the battery level or charging state
+ *   changes.
+ * Only 0x20 is acted on.
  * The receiver also answers a separate command channel used only for firmware
  * updates; it stays silent during normal operation and is deliberately untouched.
  *
@@ -149,6 +165,11 @@
 #define RAZER_BS_IDS_RETRY_MS       4000 // gap between fetch retries
 #define RAZER_BS_IDS_MAX_ATTEMPTS   6    // stop retrying after this many
 
+/* Headset link tracking (see razer_blackshark_link_work). */
+#define RAZER_BS_LINK_UNKNOWN       (-1) // link state not read yet
+#define RAZER_BS_LINK_RETRY_MS      2000 // gap between initial link read retries
+#define RAZER_BS_LINK_MAX_ATTEMPTS  5    // stop retrying the initial read after this many
+
 struct razer_blackshark_device {
     struct usb_device *usb_dev;
     struct hid_device *hdev;
@@ -182,7 +203,19 @@ struct razer_blackshark_device {
     unsigned int ids_attempts;      // fetch retries so far (touched only by ids_work)
     bool serial_read;               // a usable serial has been stored
     bool fw_read;                   // a firmware version has been stored
-    bool ids_stop;                  // disconnect in progress: ids_work must not rearm
+    bool ids_stop;                  // teardown in progress: no work may be (re)armed
+
+    /*
+     * Headset link state (dongle only): RAZER_BS_LINK_UNKNOWN, 0 or 1. Set from
+     * .raw_event when the receiver pushes register 0x20, and once by @link_work
+     * reading it while still unknown. @link_work reports each change to user
+     * space; @link_reported is the last state it reported and, like
+     * @link_attempts, is only touched by @link_work.
+     */
+    struct delayed_work link_work;
+    int link_state;
+    int link_reported;
+    unsigned int link_attempts;
 };
 
 #endif /* DRIVER_RAZERBLACKSHARK_H_ */
