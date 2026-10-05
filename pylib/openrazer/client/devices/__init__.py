@@ -57,6 +57,17 @@ class RazerDevice(object):
             'get_low_battery_threshold': self._has_feature('razer.device.power', 'getLowBatteryThreshold'),
             'set_low_battery_threshold': self._has_feature('razer.device.power', 'setLowBatteryThreshold'),
 
+            # The BlackShark V2 Pro 2.4 serves these on razer.device.audio and the
+            # BlackShark V2 HS on razer.device.misc, with different value types;
+            # see the equalizer / sidetone properties and the HS get_* / set_*
+            # methods below.
+            'equalizer': self._has_feature('razer.device.audio', ('getEqualizer', 'setEqualizer')) or self._has_feature('razer.device.misc', ('getEqualizer', 'setEqualizer')),
+            'equalizer_preset': self._has_feature('razer.device.audio', ('getEqualizerPreset', 'setEqualizerPreset')) or self._has_feature('razer.device.misc', ('getEqualizerPreset', 'setEqualizerPreset')),
+            'sidetone': self._has_feature('razer.device.audio', ('getSidetone', 'setSidetone')) or self._has_feature('razer.device.misc', ('getSidetone', 'setSidetone')),
+            'mic_mute': self._has_feature('razer.device.audio', 'getMicMute') or self._has_feature('razer.device.misc', 'getMicMute'),
+            'dnd': self._has_feature('razer.device.misc', ('getDnd', 'setDnd')),
+            'hardware_model': self._has_feature('razer.device.misc', 'getHardwareModel'),
+
             'macro_logic': self._has_feature('razer.device.macro'),
             'keyboard_layout': self._has_feature('razer.device.misc', 'getKeyboardLayout'),
             'game_mode_led': self._has_feature('razer.device.led.gamemode'),
@@ -75,16 +86,11 @@ class RazerDevice(object):
             'scroll_acceleration': self._has_feature('razer.device.scroll', ('getScrollAcceleration', 'setScrollAcceleration')),
             'scroll_smart_reel': self._has_feature('razer.device.scroll', ('getScrollSmartReel', 'setScrollSmartReel')),
 
-            # Headset (BlackShark V2 HS) attrs
-            'hardware_model': self._has_feature('razer.device.misc', 'getHardwareModel'),
+            # Headset (BlackShark V2 HS) attrs; the ones it shares with the
+            # BlackShark V2 Pro 2.4 are declared above
             'edition_id': self._has_feature('razer.device.misc', 'getEditionId'),
             'hardware_id': self._has_feature('razer.device.misc', 'getHardwareId'),
             'equalizer_enable': self._has_feature('razer.device.misc', ('getEqualizerEnable', 'setEqualizerEnable')),
-            'equalizer_preset': self._has_feature('razer.device.misc', ('getEqualizerPreset', 'setEqualizerPreset')),
-            'equalizer': self._has_feature('razer.device.misc', ('getEqualizer', 'setEqualizer')),
-            'sidetone': self._has_feature('razer.device.misc', ('getSidetone', 'setSidetone')),
-            'mic_mute': self._has_feature('razer.device.misc', 'getMicMute'),
-            'dnd': self._has_feature('razer.device.misc', ('getDnd', 'setDnd')),
             'status_indicator': self._has_feature('razer.device.misc', ('getStatusIndicator', 'setStatusIndicator')),
 
             # Default device is a chroma so lighting capabilities
@@ -253,6 +259,8 @@ class RazerDevice(object):
             self._dbus_interfaces['dpi'] = _dbus.Interface(self._dbus, "razer.device.dpi")
         if self.has('battery'):
             self._dbus_interfaces['power'] = _dbus.Interface(self._dbus, "razer.device.power")
+        if self._has_feature('razer.device.audio'):
+            self._dbus_interfaces['audio'] = _dbus.Interface(self._dbus, "razer.device.audio")
         if self.has('game_mode_led'):
             self._dbus_interfaces['game_mode_led'] = _dbus.Interface(self._dbus, "razer.device.led.gamemode")
         if self.has('keyswitch_optimization'):
@@ -537,6 +545,172 @@ class RazerDevice(object):
             raise NotImplementedError()
 
     @property
+    def equalizer(self) -> list[int]:
+        """
+        Get the on-device equalizer
+
+        :return: 10 per-band gains in dB (low to high frequency)
+        :rtype: list of int
+
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('equalizer') and self._has_feature('razer.device.audio'):
+            return [int(b) for b in self._dbus_interfaces['audio'].getEqualizer()]
+        else:
+            raise NotImplementedError()
+
+    @equalizer.setter
+    def equalizer(self, bands: list[int]) -> None:
+        """
+        Set the on-device equalizer
+
+        :param bands: 10 per-band gains in dB (low to high frequency), each
+                      clamped to +/- 5 dB
+        :type bands: list of int
+
+        :raises NotImplementedError: If function is not supported
+        :raises ValueError: If bands is not a list of 10 integers
+        """
+        if not self.has('equalizer') and self._has_feature('razer.device.audio'):
+            raise NotImplementedError()
+
+        bands = list(bands)
+        if len(bands) != 10:
+            raise ValueError("Equalizer requires exactly 10 bands")
+        self._dbus_interfaces['audio'].setEqualizer([int(b) for b in bands])
+
+    @property
+    def equalizer_preset(self) -> str:
+        """
+        Get the active device EQ preset
+
+        :return: One of "game", "music", "movie", "game1".."game5", "custom"
+        :rtype: str
+
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('equalizer_preset') and self._has_feature('razer.device.audio'):
+            return str(self._dbus_interfaces['audio'].getEqualizerPreset())
+        else:
+            raise NotImplementedError()
+
+    @equalizer_preset.setter
+    def equalizer_preset(self, preset: str) -> None:
+        """
+        Select the device EQ preset
+
+        "game", "music" and "movie" use curves stored on the device;
+        "custom" applies the bands set via the equalizer property;
+        "game1".."game5" are the five fixed game-specific EQ profiles.
+
+        :param preset: One of "game", "music", "movie", "game1".."game5", "custom"
+        :type preset: str
+
+        :raises NotImplementedError: If function is not supported
+        :raises ValueError: If preset is unknown
+        """
+        if not self.has('equalizer_preset') and self._has_feature('razer.device.audio'):
+            raise NotImplementedError()
+
+        preset = str(preset).lower()
+        if preset not in ('game', 'music', 'movie', 'custom',
+                          'game1', 'game2', 'game3', 'game4', 'game5'):
+            raise ValueError("Preset must be one of: game, music, movie, game1..game5, custom")
+        self._dbus_interfaces['audio'].setEqualizerPreset(preset)
+
+    @property
+    def sidetone(self) -> int:
+        """
+        Get the sidetone (mic monitoring) level as a percentage
+
+        :return: 0-100, where 0 means sidetone is off
+        :rtype: int
+
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('sidetone') and self._has_feature('razer.device.audio'):
+            return int(self._dbus_interfaces['audio'].getSidetone())
+        else:
+            raise NotImplementedError()
+
+    @sidetone.setter
+    def sidetone(self, level: int) -> None:
+        """
+        Set the sidetone (mic monitoring) level: hear your own mic in the headset
+
+        :param level: 0-100, where 0 disables sidetone
+        :type level: int
+
+        :raises NotImplementedError: If function is not supported
+        :raises ValueError: If level is not 0-100
+        """
+        if not self.has('sidetone') and self._has_feature('razer.device.audio'):
+            raise NotImplementedError()
+
+        level = int(level)
+        if not 0 <= level <= 100:
+            raise ValueError("Sidetone level must be 0-100")
+        self._dbus_interfaces['audio'].setSidetone(level)
+
+    @property
+    def mic_mute(self) -> bool:
+        """
+        Get the state of the headset's hardware mic-mute button (read-only)
+
+        :return: True if the microphone is muted
+        :rtype: bool
+
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('mic_mute') and self._has_feature('razer.device.audio'):
+            return bool(self._dbus_interfaces['audio'].getMicMute())
+        else:
+            raise NotImplementedError()
+
+    @property
+    def hardware_model(self) -> str:
+        """
+        Get the product id the headset reports for itself, as a 4-digit hex
+        string. Over a 2.4GHz dongle this identifies the paired headset.
+
+        :rtype: str
+
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('hardware_model'):
+            return str(self._dbus_interfaces['device'].getHardwareModel())
+        else:
+            raise NotImplementedError()
+
+    @property
+    def dnd(self) -> bool:
+        """
+        Get whether the headset's "Do Not Disturb" mode is enabled
+
+        :rtype: bool
+
+        :raises NotImplementedError: If function is not supported
+        """
+        if self.has('dnd'):
+            return bool(self._dbus_interfaces['device'].getDnd())
+        else:
+            raise NotImplementedError()
+
+    @dnd.setter
+    def dnd(self, enabled: bool) -> None:
+        """
+        Toggle the headset's "Do Not Disturb" mode
+
+        :param enabled: True to enable
+        :type enabled: bool
+
+        :raises NotImplementedError: If function is not supported
+        """
+        if not self.has('dnd'):
+            raise NotImplementedError()
+        self._dbus_interfaces['device'].setDnd(bool(enabled))
+
+    @property
     def poll_rate(self) -> int:
         """
         Get poll rate from device
@@ -658,7 +832,7 @@ class RazerDevice(object):
         :param preset: preset code (0x07 game, 0x08 music, 0x09 movie, 0xff custom)
         :raises NotImplementedError: If function is not supported
         """
-        if self.has('equalizer_preset'):
+        if self.has('equalizer_preset') and not self._has_feature('razer.device.audio'):
             self._dbus_interfaces['device'].setEqualizerPreset(int(preset))
         else:
             raise NotImplementedError()
@@ -670,7 +844,7 @@ class RazerDevice(object):
         :return: preset code (0x07 game, 0x08 music, 0x09 movie, 0xff custom)
         :raises NotImplementedError: If function is not supported
         """
-        if self.has('equalizer_preset'):
+        if self.has('equalizer_preset') and not self._has_feature('razer.device.audio'):
             return int(self._dbus_interfaces['device'].getEqualizerPreset())
         else:
             raise NotImplementedError()
@@ -683,7 +857,7 @@ class RazerDevice(object):
         :param bands: exactly 10 signed band values
         :raises NotImplementedError: If function is not supported
         """
-        if self.has('equalizer'):
+        if self.has('equalizer') and not self._has_feature('razer.device.audio'):
             bands = [int(b) for b in bands]
             if len(bands) != 10:
                 raise ValueError("Equalizer requires exactly 10 bands")
@@ -699,7 +873,7 @@ class RazerDevice(object):
         :return: 10 signed band values
         :raises NotImplementedError: If function is not supported
         """
-        if self.has('equalizer'):
+        if self.has('equalizer') and not self._has_feature('razer.device.audio'):
             return [int(b) for b in self._dbus_interfaces['device'].getEqualizer()]
         else:
             raise NotImplementedError()
@@ -711,7 +885,7 @@ class RazerDevice(object):
         :param level: sidetone level 0-15
         :raises NotImplementedError: If function is not supported
         """
-        if self.has('sidetone'):
+        if self.has('sidetone') and not self._has_feature('razer.device.audio'):
             self._dbus_interfaces['device'].setSidetone(int(level))
         else:
             raise NotImplementedError()
@@ -723,7 +897,7 @@ class RazerDevice(object):
         :return: sidetone level
         :raises NotImplementedError: If function is not supported
         """
-        if self.has('sidetone'):
+        if self.has('sidetone') and not self._has_feature('razer.device.audio'):
             return int(self._dbus_interfaces['device'].getSidetone())
         else:
             raise NotImplementedError()
@@ -735,7 +909,7 @@ class RazerDevice(object):
         :return: True if the mic is muted
         :raises NotImplementedError: If function is not supported
         """
-        if self.has('mic_mute'):
+        if self.has('mic_mute') and not self._has_feature('razer.device.audio'):
             return bool(self._dbus_interfaces['device'].getMicMute())
         else:
             raise NotImplementedError()

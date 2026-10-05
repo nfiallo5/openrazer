@@ -139,6 +139,18 @@ declare -A files_metadata=(
     ["version"]="r;1.0.0"
 )
 
+# Per-driver defaults that take precedence over files_metadata, keyed by
+# "driver:attr". The BlackShark V2 Pro driver reads and writes these as decimal
+# text, where the BlackShark V2 HS driver uses raw bytes.
+declare -A driver_files_metadata=(
+    ["razerblacksharkpro:dnd"]="rw;0"
+    ["razerblacksharkpro:equalizer"]="rw;"
+    ["razerblacksharkpro:equalizer_preset"]="rw;255"
+    ["razerblacksharkpro:hw_model"]="r;0556"
+    ["razerblacksharkpro:mic_mute"]="r;0"
+    ["razerblacksharkpro:sidetone"]="rw;0"
+)
+
 # USB PID of devices that use single-byte values for DPI
 byte_dpi_devices=(
     '0013' # Razer Orochi 2011
@@ -236,7 +248,7 @@ EOF
         # "fn_toggle": not used by daemon
         [[ "$attr" = "" || "$attr" = "test" || "$attr" = "fn_toggle" ]] && continue
 
-        metadata="${files_metadata[$attr]}"
+        metadata="${driver_files_metadata[$driver:$attr]:-${files_metadata[$attr]}}"
         if [ -z "$metadata" ]; then
             echo "Error: Missing metadata for attr: $attr"
             exit 1
